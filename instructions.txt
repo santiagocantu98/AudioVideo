@@ -1,0 +1,81 @@
+Create a Python-based web service with the following specifications:
+
+1. Set up a Flask application to handle API requests.
+
+2. Implement two main API endpoints:
+   a. '/merge_audio' - Merges multiple audio files into a single audio file.
+   b. '/merge_audio_video' - Merges an audio file with a video file.
+
+3. Use FFmpeg for audio and video processing. Ensure FFmpeg is installed and accessible.
+
+4. For the '/merge_audio' endpoint:
+   - Accept multiple audio files as input.
+   - Use FFmpeg to concatenate the audio files.
+   - Return the merged audio file as a response.
+
+5. For the '/merge_audio_video' endpoint:
+   - Accept one audio file and one video file as input.
+   - Use FFmpeg to merge the audio with the video.
+   - Return the resulting video file with the merged audio as a response.
+
+6. Implement error handling for file uploads, processing errors, and invalid requests.
+
+7. Use appropriate HTTP status codes and JSON responses for success and error cases.
+
+8. Ensure the API can be easily called from Airtable or other external services.
+
+9. Include comments and docstrings for clear code documentation.
+
+10. Implement logging for debugging and monitoring purposes.
+
+11. Use a configuration file or environment variables for any settings (e.g., file storage locations, FFmpeg path).
+
+12. Consider implementing a simple rate limiting mechanism to prevent abuse.
+
+13. Add a basic authentication mechanism to secure the API endpoints.
+
+Here's a skeleton structure to get started:
+
+import os
+from flask import Flask, request, send_file, jsonify
+import subprocess
+import uuid
+import logging
+
+app = Flask(__name__)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+
+# Configuration
+UPLOAD_FOLDER = 'uploads'
+OUTPUT_FOLDER = 'output'
+ALLOWED_AUDIO_EXTENSIONS = {'mp3', 'wav', 'ogg'}
+ALLOWED_VIDEO_EXTENSIONS = {'mp4', 'avi', 'mov'}
+
+# Helper functions
+def allowed_file(filename, allowed_extensions):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in allowed_extensions
+
+def merge_audio_files(input_files, output_file):
+    # Implement FFmpeg command to merge audio files
+    pass
+
+def merge_audio_with_video(audio_file, video_file, output_file):
+    # Implement FFmpeg command to merge audio with video
+    pass
+
+@app.route('/merge_audio', methods=['POST'])
+def merge_audio():
+    # Implement logic for merging multiple audio files
+    pass
+
+@app.route('/merge_audio_video', methods=['POST'])
+def merge_audio_video():
+    # Implement logic for merging audio with video
+    pass
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+Please implement the full functionality based on this structure, ensuring all requirements are met.
