@@ -17,12 +17,14 @@ from botocore.exceptions import ClientError
 import threading
 import shutil
 from datetime import datetime
+from flask_cors import CORS
 
 # Load environment variables
 load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Configuration
 UPLOAD_FOLDER = 'uploads'
@@ -52,6 +54,7 @@ os.makedirs(DEBUG_FOLDER, exist_ok=True)
 
 # Create Flask app
 app = Flask(__name__)
+CORS(app)
 
 # Configure limiter to use in-memory storage
 limiter = Limiter(
@@ -315,9 +318,16 @@ def merge_videos():
 @app.route('/process_scene', methods=['POST'])
 @limiter.limit("10 per minute")
 def process_scene():
+    temp_files = []
+    processed_files = []
+    list_file = None
+    output_filepath = None
+    
     try:
+        logging.info('--- process_scene: Start ---')
         data = request.json
         if not data or 'shots' not in data:
+            logging.error('Missing required data. Need shots')
             return jsonify({'error': 'Missing required data. Need shots'}), 400
 
         shots = data['shots']
@@ -325,151 +335,194 @@ def process_scene():
         scene_id = data.get('scene_id', str(uuid.uuid4()))
 
         if len(shots) < 1:
+            logging.error('At least one shot is required')
             return jsonify({'error': 'At least one shot is required'}), 400
 
         # Get request-specific folder
         request_folder = get_request_folder()
-        temp_files = []
-        processed_files = []
-        list_file = None
+        logging.info(f'Using request folder: {request_folder}')
 
-        try:
-            # Step 1: Process all shots (cut videos according to timestamps)
-            for i, shot in enumerate(shots):
-                if not all(k in shot for k in ['url', 'filename']):
-                    return jsonify({'error': 'Invalid shot data structure. Each shot must have url and filename'}), 400
+        # Step 1: Process all shots (cut videos according to timestamps)
+        for i, shot in enumerate(shots):
+            logging.info(f'Processing shot {i+1}/{len(shots)}')
+            if not all(k in shot for k in ['url', 'filename']):
+                logging.error('Invalid shot data structure. Each shot must have url and filename')
+                return jsonify({'error': 'Invalid shot data structure. Each shot must have url and filename'}), 400
 
-                url = shot['url']
-                filename = shot['filename']
-                timestamp = shot.get('timestamp')
-                
-                logging.info(f"\nProcessing shot {i+1}/{len(shots)}:")
-                logging.info(f"URL: {url}")
-                logging.info(f"Filename: {filename}")
-                
-                if timestamp:
-                    start_time, end_time = timestamp
-                    logging.info(f"Timestamp: {start_time} to {end_time}")
-                    logging.info(f"Duration: {end_time - start_time} seconds")
-                else:
-                    logging.info("No timestamp provided, will use full video")
-                    start_time = None
-                    end_time = None
-
-                # Download from S3
-                video_content = download_from_s3(url)
-                
-                # Save to temporary file in request-specific folder
-                temp_input = os.path.abspath(os.path.join(request_folder, f"{uuid.uuid4()}.mp4"))
-                with open(temp_input, 'wb') as f:
-                    f.write(video_content)
-                temp_files.append(temp_input)
-                logging.info(f"Saved input video to: {temp_input}")
-
-                # Process with timestamps if provided, otherwise use full video
-                temp_output = os.path.abspath(os.path.join(request_folder, f"{uuid.uuid4()}.mp4"))
-                try:
-                    if timestamp:
-                        process_video_with_timestamps(temp_input, start_time, end_time, temp_output)
-                    else:
-                        shutil.copy2(temp_input, temp_output)
-                    processed_files.append(temp_output)
-                    logging.info(f"Processed video saved to: {temp_output}")
-                except Exception as e:
-                    logging.error(f"Error processing shot {i+1}: {str(e)}")
-                    raise
-
-            # Step 2: Merge all processed videos
-            shots_merged = os.path.abspath(os.path.join(request_folder, f"{uuid.uuid4()}.mp4"))
-            list_file = os.path.abspath(os.path.join(request_folder, 'shots_list.txt'))
+            url = shot['url']
+            filename = shot['filename']
+            timestamp = shot.get('timestamp')
             
-            # Create the list file with absolute paths
-            with open(list_file, 'w', encoding='utf-8') as f:
-                for i, file in enumerate(processed_files):
-                    if not os.path.exists(file):
-                        logging.error(f"Processed file not found: {file}")
-                        raise Exception(f"Processed file not found: {file}")
-                    size = os.path.getsize(file)
-                    logging.info(f"File {i}: {file} (size: {size} bytes)")
-                    if size == 0:
-                        logging.error(f"File {file} is empty!")
-                    f.write(f"file '{file}'\n")
-
-            # Merge videos
-            merge_cmd = [
-                'ffmpeg',
-                '-y',
-                '-f', 'concat',
-                '-safe', '0',
-                '-i', list_file,
-                '-c:v', 'libx264',
-                '-preset', 'medium',
-                '-crf', '18',
-                '-movflags', '+faststart',
-                '-c:a', 'aac',
-                '-b:a', '192k',
-                '-strict', 'experimental',
-                shots_merged
-            ]
+            logging.info(f"URL: {url}")
+            logging.info(f"Filename: {filename}")
             
-            logging.info(f"\nExecuting merge command: {' '.join(merge_cmd)}")
-            result = subprocess.run(merge_cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                logging.error(f"FFmpeg error output: {result.stderr}")
-                raise Exception(f"Failed to merge videos: {result.stderr}")
-
-            # Step 3: Add audio if provided
-            if audio_url:
-                try:
-                    audio_content = download_from_s3(audio_url)
-                    audio_file = os.path.abspath(os.path.join(request_folder, f"{uuid.uuid4()}.mp3"))
-                    with open(audio_file, 'wb') as f:
-                        f.write(audio_content)
-                    temp_files.append(audio_file)
-
-                    # Final output with audio
-                    output_filename = f"scene_{scene_id}.mp4"
-                    output_filepath = os.path.abspath(os.path.join(OUTPUT_FOLDER, output_filename))
-
-                    merge_audio_cmd = [
-                        'ffmpeg',
-                        '-y',
-                        '-i', shots_merged,
-                        '-i', audio_file,
-                        '-c:v', 'copy',
-                        '-c:a', 'aac',
-                        '-map', '0:v:0',
-                        '-map', '1:a:0',
-                        output_filepath
-                    ]
-                    
-                    result = subprocess.run(merge_audio_cmd, capture_output=True, text=True)
-                    if result.returncode != 0:
-                        logging.error(f"FFmpeg error output: {result.stderr}")
-                        raise Exception(f"Failed to merge audio: {result.stderr}")
-                except Exception as e:
-                    logging.warning(f"Error adding audio: {str(e)}, continuing with video only")
-                    output_filename = f"scene_{scene_id}.mp4"
-                    output_filepath = os.path.abspath(os.path.join(OUTPUT_FOLDER, output_filename))
-                    shutil.copy2(shots_merged, output_filepath)
+            if timestamp:
+                start_time, end_time = timestamp
+                logging.info(f"Timestamp: {start_time} to {end_time}")
+                logging.info(f"Duration: {end_time - start_time} seconds")
             else:
-                # No audio provided, just use the merged video
+                logging.info("No timestamp provided, will use full video")
+                start_time = None
+                end_time = None
+
+            # Download from S3
+            logging.info('Downloading video...')
+            video_content = download_from_s3(url)
+            
+            # Save to temporary file in request-specific folder
+            temp_input = os.path.abspath(os.path.join(request_folder, f"{uuid.uuid4()}.mp4"))
+            with open(temp_input, 'wb') as f:
+                f.write(video_content)
+            temp_files.append(temp_input)
+            logging.info(f"Saved input video to: {temp_input}")
+
+            # Process with timestamps if provided, otherwise use full video
+            temp_output = os.path.abspath(os.path.join(request_folder, f"{uuid.uuid4()}.mp4"))
+            try:
+                logging.info('Processing video with timestamps...')
+                if timestamp:
+                    process_video_with_timestamps(temp_input, start_time, end_time, temp_output)
+                else:
+                    shutil.copy2(temp_input, temp_output)
+                processed_files.append(temp_output)
+                logging.info(f"Processed video saved to: {temp_output}")
+            except Exception as e:
+                logging.error(f"Error processing shot {i+1}: {str(e)}")
+                raise
+
+        # Step 2: Merge all processed videos
+        shots_merged = os.path.abspath(os.path.join(request_folder, f"{uuid.uuid4()}.mp4"))
+        list_file = os.path.abspath(os.path.join(request_folder, 'shots_list.txt'))
+        
+        # Create the list file with absolute paths
+        with open(list_file, 'w', encoding='utf-8') as f:
+            for i, file in enumerate(processed_files):
+                if not os.path.exists(file):
+                    logging.error(f"Processed file not found: {file}")
+                    raise Exception(f"Processed file not found: {file}")
+                size = os.path.getsize(file)
+                logging.info(f"File {i}: {file} (size: {size} bytes)")
+                if size == 0:
+                    logging.error(f"File {file} is empty!")
+                f.write(f"file '{file}'\n")
+
+        # Merge videos
+        merge_cmd = [
+            'ffmpeg',
+            '-y',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', list_file,
+            '-c:v', 'libx264',
+            '-preset', 'medium',
+            '-crf', '18',
+            '-movflags', '+faststart',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-strict', 'experimental',
+            shots_merged
+        ]
+        logging.info(f"Executing merge command: {' '.join(merge_cmd)}")
+        result = subprocess.run(merge_cmd, capture_output=True, text=True)
+        logging.info(f"Merge command finished with return code {result.returncode}")
+        if result.returncode != 0:
+            logging.error(f"FFmpeg error output: {result.stderr}")
+            raise Exception(f"Failed to merge videos: {result.stderr}")
+
+        # Step 3: Add audio if provided
+        if audio_url:
+            try:
+                logging.info('Downloading audio...')
+                audio_content = download_from_s3(audio_url)
+                audio_file = os.path.abspath(os.path.join(request_folder, f"{uuid.uuid4()}.mp3"))
+                with open(audio_file, 'wb') as f:
+                    f.write(audio_content)
+                temp_files.append(audio_file)
+
+                # Final output with audio
+                output_filename = f"scene_{scene_id}.mp4"
+                output_filepath = os.path.abspath(os.path.join(OUTPUT_FOLDER, output_filename))
+
+                merge_audio_cmd = [
+                    'ffmpeg',
+                    '-y',
+                    '-i', shots_merged,
+                    '-i', audio_file,
+                    '-c:v', 'copy',
+                    '-c:a', 'aac',
+                    '-map', '0:v:0',
+                    '-map', '1:a:0',
+                    output_filepath
+                ]
+                logging.info(f"Executing merge audio command: {' '.join(merge_audio_cmd)}")
+                result = subprocess.run(merge_audio_cmd, capture_output=True, text=True)
+                logging.info(f"Merge audio command finished with return code {result.returncode}")
+                if result.returncode != 0:
+                    logging.error(f"FFmpeg error output: {result.stderr}")
+                    raise Exception(f"Failed to merge audio: {result.stderr}")
+            except Exception as e:
+                logging.warning(f"Error adding audio: {str(e)}, continuing with video only")
                 output_filename = f"scene_{scene_id}.mp4"
                 output_filepath = os.path.abspath(os.path.join(OUTPUT_FOLDER, output_filename))
                 shutil.copy2(shots_merged, output_filepath)
+        else:
+            # No audio provided, just use the merged video
+            output_filename = f"scene_{scene_id}.mp4"
+            output_filepath = os.path.abspath(os.path.join(OUTPUT_FOLDER, output_filename))
+            shutil.copy2(shots_merged, output_filepath)
 
-            if not os.path.exists(output_filepath) or os.path.getsize(output_filepath) == 0:
-                raise Exception("Final output file is empty or does not exist")
+        if not os.path.exists(output_filepath) or os.path.getsize(output_filepath) == 0:
+            logging.error('Final output file is empty or does not exist')
+            raise Exception("Final output file is empty or does not exist")
 
-            logging.info(f"Final output saved to: {output_filepath}")
-            return send_file(output_filepath, as_attachment=True, download_name=output_filename)
-
-        finally:
-            # Clean up request-specific folder
-            cleanup_request_folder()
+        logging.info(f"Final output saved to: {output_filepath}")
+        logging.info(f"Output file size: {os.path.getsize(output_filepath)} bytes")
+        
+        # Ensure the file exists and is readable before sending
+        if not os.path.exists(output_filepath):
+            logging.error('Output file not found before send_file')
+            raise Exception("Output file not found")
+        
+        logging.info('About to send_file...')
+        response = send_file(
+            output_filepath,
+            mimetype='video/mp4',
+            as_attachment=True,
+            download_name=output_filename
+        )
+        logging.info('send_file called, setting up cleanup callback...')
+        
+        @response.call_on_close
+        def cleanup():
+            logging.info('--- Cleanup: Start ---')
+            try:
+                # Clean up temporary files
+                for file in temp_files + processed_files:
+                    if os.path.exists(file):
+                        os.remove(file)
+                if list_file and os.path.exists(list_file):
+                    os.remove(list_file)
+                # Clean up request folder
+                cleanup_request_folder()
+                logging.info('--- Cleanup: Done ---')
+            except Exception as e:
+                logging.error(f"Error during cleanup: {str(e)}")
+        
+        logging.info('Returning response from process_scene')
+        return response
 
     except Exception as e:
         logging.error(f"Error in process_scene: {str(e)}")
+        # Clean up on error
+        try:
+            for file in temp_files + processed_files:
+                if os.path.exists(file):
+                    os.remove(file)
+            if list_file and os.path.exists(list_file):
+                os.remove(list_file)
+            cleanup_request_folder()
+        except Exception as cleanup_error:
+            logging.error(f"Error during cleanup: {str(cleanup_error)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/merge_scenes', methods=['POST'])
