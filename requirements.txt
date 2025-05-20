@@ -1,3 +1,6 @@
-Flask
-python-dotenv
-Flask-Limiter
+Flask==2.3.3
+python-dotenv==1.0.0
+Flask-Limiter==3.5.0
+boto3==1.28.38
+requests==2.31.0
+redis==5.0.1
